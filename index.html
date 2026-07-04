@@ -1,0 +1,149 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>Skyline - Crypto City</title>
+  <style>
+    * { margin: 0; padding: 0; box-sizing: border-box; }
+    html, body { width: 100%; height: 100%; overflow: hidden; }
+    canvas { display: block; touch-action: manipulation; }
+
+    #hero {
+      position: fixed;
+      top: 20px;
+      left: 16px;
+      z-index: 10;
+      pointer-events: none;
+      font-family: system-ui, sans-serif;
+    }
+    #hero-value {
+      font-size: 24px;
+      font-weight: 700;
+      color: rgba(0,0,0,0.75);
+      line-height: 1.2;
+    }
+    #hero-label {
+      font-size: 11px;
+      color: rgba(0,0,0,0.4);
+      margin-top: 2px;
+    }
+    #hero-legend {
+      margin-top: 8px;
+      display: flex;
+      align-items: center;
+      gap: 6px;
+      font-size: 9px;
+      color: rgba(0,0,0,0.5);
+    }
+    #legend-bar {
+      width: 100px;
+      height: 8px;
+      border-radius: 4px;
+      background: linear-gradient(to right, #26a69a, #e0e0e0, #e57373);
+    }
+
+    #stamp {
+      position: fixed;
+      bottom: 20px;
+      left: 16px;
+      z-index: 10;
+      pointer-events: none;
+      font: 10px/1 system-ui, sans-serif;
+      color: rgba(0,0,0,0.4);
+      letter-spacing: 0.5px;
+    }
+
+    #desc {
+      position: fixed;
+      bottom: 44px;
+      left: 50%;
+      transform: translateX(-50%);
+      z-index: 10;
+      pointer-events: none;
+      font: 11px/1.4 system-ui, sans-serif;
+      color: rgba(0,0,0,0.45);
+      text-align: center;
+      max-width: 65ch;
+    }
+
+    #quietzone {
+      position: fixed;
+      top: 50%;
+      left: 50%;
+      transform: translate(-50%, -50%);
+      z-index: 20;
+      pointer-events: none;
+      opacity: 0;
+      transition: opacity 160ms ease-out;
+    }
+    #quietzone.visible {
+      opacity: 1;
+    }
+    #quietzone-content {
+      pointer-events: auto;
+      background: rgba(245, 240, 232, 0.95);
+      border: 1px solid rgba(141, 110, 99, 0.3);
+      border-radius: 12px;
+      padding: 20px 24px;
+      min-width: 220px;
+      font-family: system-ui, sans-serif;
+      backdrop-filter: blur(8px);
+      box-shadow: 0 4px 24px rgba(0,0,0,0.12);
+    }
+    #qz-name {
+      font-size: 18px;
+      font-weight: 600;
+      color: rgba(0,0,0,0.8);
+    }
+    #qz-symbol {
+      font-size: 13px;
+      color: rgba(0,0,0,0.5);
+      margin-left: 6px;
+    }
+    #qz-price {
+      font-size: 28px;
+      font-weight: 700;
+      color: rgba(0,0,0,0.8);
+      margin-top: 4px;
+    }
+    #qz-change {
+      font-size: 14px;
+      margin-top: 2px;
+      font-weight: 500;
+    }
+    #qz-sub {
+      font-size: 11px;
+      color: rgba(0,0,0,0.5);
+      margin-top: 6px;
+    }
+
+    @media (prefers-reduced-motion: reduce) {
+      #quietzone { transition: none; }
+      * { animation-duration: 0.01ms !important; animation-iteration-count: 1 !important; }
+    }
+  </style>
+</head>
+<body>
+  <div id="hero">
+    <div id="hero-value">Loading...</div>
+    <div id="hero-label">Total Market Cap</div>
+    <div id="hero-legend">
+      <span>-5%</span>
+      <div id="legend-bar"></div>
+      <span>+5%</span>
+    </div>
+  </div>
+  <div id="desc">A crypto city skyline - building height = price, color = 24h change</div>
+  <div id="stamp">CoinGecko · 10 coins · loading...</div>
+  <div id="quietzone">
+    <div id="quietzone-content">
+      <div><span id="qz-name"></span><span id="qz-symbol"></span></div>
+      <div id="qz-price"></div>
+      <div id="qz-change"></div>
+      <div id="qz-sub"></div>
+    </div>
+  </div>
+  <script type="module" src="/src/main.ts"></script>
+</body>
+</html>
