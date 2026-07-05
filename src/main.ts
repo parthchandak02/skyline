@@ -6,15 +6,21 @@ import { OrbitControls } from 'three/examples/jsm/controls/OrbitControls.js';
 // ─── CONFIG ───
 const C = {
   coinCount: 10,
-  buildingMaxHeight: 5,
-  buildingMinHeight: 0.5,
+  buildingMaxHeight: 6,
+  buildingMinHeight: 0.8,
   buildingMaxWidth: 2.0,
   buildingMinWidth: 0.8,
   buildingDepth: 1.2,
-  arcRadius: 8,
+  arcRadius: 9,
   pollInterval: 60000,
   damping: 0.05,
+  heightLerp: 0.04,
+  colorLerp: 0.04,
 };
+
+const ROOF_HEIGHT = 0.3;
+const ROOF_GREEN = '#26a69a';
+const ROOF_RED = '#e57373';
 
 // ─── PALETTE (Light — Daylight) ───
 const PALETTE = {
@@ -48,12 +54,26 @@ type CoinData = {
   price_change_percentage_24h: number; market_cap: number; market_cap_rank: number;
 };
 
+type BuildingState = {
+  group: THREE.Group;
+  body: THREE.Mesh;
+  roof: THREE.Mesh;
+  label: HTMLDivElement;
+  currentHeight: number;
+  targetHeight: number;
+  currentRoofColor: THREE.Color;
+  targetRoofColor: THREE.Color;
+  width: number;
+};
+
 let coins: CoinData[] = [...FALLBACK_COINS];
 let isLive = false;
 let lastFetchTime = 0;
 let selectedIndex = -1;
 let selectedBuilding: THREE.Mesh | null = null;
 let idleTimer = 0;
+
+const buildingStates: BuildingState[] = [];
 
 // ─── DOM REFS ───
 const heroValue = document.getElementById('hero-value')!;
@@ -83,7 +103,7 @@ const scene = new THREE.Scene();
 scene.background = new THREE.Color(PALETTE.bg);
 
 const camera = new THREE.PerspectiveCamera(45, window.innerWidth / window.innerHeight, 0.1, 100);
-camera.position.set(14, 8, 14);
+camera.position.set(15, 7, 15);
 camera.lookAt(0, 1.5, 0);
 
 const controls = new OrbitControls(camera, renderer.domElement);
@@ -118,11 +138,43 @@ ground.rotation.x = -Math.PI / 2;
 ground.position.y = -0.05;
 scene.add(ground);
 
-// ─── BUILDINGS ───
-const buildings: THREE.Mesh[] = [];
-const buildingLabels: HTMLDivElement[] = [];
+// ─── LEGEND ───
+function createLegend() {
+  const legend = document.createElement('div');
+  legend.style.cssText = `
+    position: fixed;
+    bottom: 20px;
+    left: 50%;
+    transform: translateX(-50%);
+    z-index: 10;
+    pointer-events: none;
+    display: flex;
+    align-items: center;
+    gap: 14px;
+    font: 10px/1 system-ui, sans-serif;
+    color: rgba(0,0,0,0.4);
+    letter-spacing: 0.5px;
+  `;
+  const greenSq = document.createElement('span');
+  greenSq.style.cssText = 'display:inline-block;width:10px;height:10px;background:#26a69a;border-radius:2px;';
+  const redSq = document.createElement('span');
+  redSq.style.cssText = 'display:inline-block;width:10px;height:10px;background:#e57373;border-radius:2px;';
 
-function createBuildingLabel(index: number): HTMLDivElement {
+  const upItem = document.createElement('span');
+  upItem.style.cssText = 'display:flex;align-items:center;gap:5px;';
+  upItem.append(greenSq, document.createTextNode('up in 24h'));
+
+  const downItem = document.createElement('span');
+  downItem.style.cssText = 'display:flex;align-items:center;gap:5px;';
+  downItem.append(redSq, document.createTextNode('down in 24h'));
+
+  legend.append(upItem, downItem);
+  document.body.appendChild(legend);
+}
+createLegend();
+
+// ─── BUILDINGS ───
+function createBuildingLabel(): HTMLDivElement {
   const el = document.createElement('div');
   el.style.cssText = `
     position: fixed;
@@ -149,83 +201,124 @@ function worldToScreen(pos: THREE.Vector3): { x: number; y: number } {
   };
 }
 
-function buildCity(data: CoinData[]) {
-  // Clear old buildings
-  buildings.forEach(b => { scene.remove(b); b.geometry.dispose(); (b.material as THREE.Material).dispose(); });
-  buildings.length = 0;
-  selectedBuilding = null;
-  selectedIndex = -1;
-  quietzone.classList.remove('visible');
+function getTargetHeight(coin: CoinData, data: CoinData[]): number {
+  const maxPrice = Math.max(...data.map(c => c.current_price));
+  const minPrice = Math.min(...data.map(c => c.current_price));
+  const priceRange = maxPrice - minPrice || 1;
+  const normPrice = (coin.current_price - minPrice) / priceRange;
+  return C.buildingMinHeight + normPrice * (C.buildingMaxHeight - C.buildingMinHeight);
+}
 
+function getBuildingWidth(coin: CoinData, dataLength: number): number {
+  const rankFactor = 1 - (coin.market_cap_rank - 1) / (dataLength - 1);
+  return C.buildingMinWidth + rankFactor * (C.buildingMaxWidth - C.buildingMinWidth);
+}
+
+function getRoofColor(change: number): THREE.Color {
+  return new THREE.Color(change >= 0 ? ROOF_GREEN : ROOF_RED);
+}
+
+function applyBuildingDimensions(state: BuildingState) {
+  const w = state.width;
+  state.body.scale.set(w, state.currentHeight, C.buildingDepth);
+  state.body.position.y = state.currentHeight / 2;
+  state.roof.scale.set(w * 0.85, 1, C.buildingDepth * 0.85);
+  state.roof.position.y = state.currentHeight + ROOF_HEIGHT / 2;
+}
+
+function initCity(data: CoinData[]) {
   data.forEach((coin, i) => {
-    const maxPrice = Math.max(...data.map(c => c.current_price));
-    const minPrice = Math.min(...data.map(c => c.current_price));
-    const priceRange = maxPrice - minPrice || 1;
+    const height = getTargetHeight(coin, data);
+    const width = getBuildingWidth(coin, data.length);
+    const change = coin.price_change_percentage_24h || 0;
+    const roofColor = getRoofColor(change);
 
-    // Height: normalized price
-    const normPrice = (coin.current_price - minPrice) / priceRange;
-    const height = C.buildingMinHeight + normPrice * (C.buildingMaxHeight - C.buildingMinHeight);
-
-    // Width: inverse rank (rank 1 = widest)
-    const rankFactor = 1 - (coin.market_cap_rank - 1) / (data.length - 1);
-    const width = C.buildingMinWidth + rankFactor * (C.buildingMaxWidth - C.buildingMinWidth);
-
-    // Position in arc
     const angle = (i / (data.length - 1)) * Math.PI - Math.PI / 2;
     const x = Math.cos(angle) * C.arcRadius;
     const z = Math.sin(angle) * C.arcRadius;
 
-    // Color based on 24h change
-    const change = coin.price_change_percentage_24h || 0;
-    const t = Math.max(-1, Math.min(1, change / 5)); // normalize to -1..1
-    let color: THREE.Color;
-    if (t < 0) {
-      // teal (green) to white
-      color = new THREE.Color(PALETTE.highlight).lerp(new THREE.Color('#e0e0e0'), -t);
-    } else {
-      // white to red
-      color = new THREE.Color('#e0e0e0').lerp(new THREE.Color('#e57373'), t);
-    }
+    const group = new THREE.Group();
+    group.position.set(x, 0, z);
 
-    const geo = new THREE.BoxGeometry(width, height, C.buildingDepth);
-    const mat = new THREE.MeshStandardMaterial({
+    const bodyGeo = new THREE.BoxGeometry(1, 1, 1);
+    const bodyMat = new THREE.MeshStandardMaterial({
       color: PALETTE.accent1,
       roughness: 0.6,
       metalness: 0.1,
-      emissive: color,
-      emissiveIntensity: 0.15,
     });
-    const mesh = new THREE.Mesh(geo, mat);
-    mesh.position.set(x, height / 2, z);
-    mesh.userData = { index: i, coin, baseColor: PALETTE.accent1, emissiveColor: color };
-    scene.add(mesh);
-    buildings.push(mesh);
+    const body = new THREE.Mesh(bodyGeo, bodyMat);
+    body.userData = { index: i };
 
-    // Label
-    const label = createBuildingLabel(i);
-    label.textContent = `${coin.symbol.toUpperCase()}\n$${formatPrice(coin.current_price)}`;
-    buildingLabels.push(label);
+    const roofGeo = new THREE.BoxGeometry(1, ROOF_HEIGHT, 1);
+    const roofMat = new THREE.MeshStandardMaterial({
+      color: roofColor,
+      emissive: roofColor.clone(),
+      emissiveIntensity: 0.2,
+      roughness: 0.5,
+      metalness: 0.1,
+    });
+    const roof = new THREE.Mesh(roofGeo, roofMat);
+
+    group.add(body);
+    group.add(roof);
+    scene.add(group);
+
+    const state: BuildingState = {
+      group,
+      body,
+      roof,
+      label: createBuildingLabel(),
+      currentHeight: height,
+      targetHeight: height,
+      currentRoofColor: roofColor.clone(),
+      targetRoofColor: roofColor.clone(),
+      width,
+    };
+    applyBuildingDimensions(state);
+    state.label.textContent = `${coin.symbol.toUpperCase()}\n$${formatPrice(coin.current_price)}`;
+    buildingStates.push(state);
   });
 
-  updateLabels();
   updateHero(data);
-  updateStamp(data);
+  updateStamp();
+}
+
+function applyCoinData(data: CoinData[]) {
+  data.forEach((coin, i) => {
+    const state = buildingStates[i];
+    if (!state) return;
+
+    state.targetHeight = getTargetHeight(coin, data);
+    state.targetRoofColor = getRoofColor(coin.price_change_percentage_24h || 0);
+    state.width = getBuildingWidth(coin, data.length);
+    state.body.scale.x = state.width;
+    state.roof.scale.x = state.width * 0.85;
+
+    state.label.textContent = `${coin.symbol.toUpperCase()}\n$${formatPrice(coin.current_price)}`;
+  });
+
+  if (selectedIndex >= 0 && selectedIndex < data.length) {
+    showDetail(selectedIndex);
+  }
+
+  updateHero(data);
+  updateStamp();
 }
 
 function updateLabels() {
-  buildings.forEach((b, i) => {
-    const pos = b.position.clone();
-    pos.y += (b.geometry as THREE.BoxGeometry).parameters.height / 2 + 0.8;
-    const screen = worldToScreen(pos);
-    const label = buildingLabels[i];
-    if (label) {
-      label.style.left = `${screen.x}px`;
-      label.style.top = `${screen.y}px`;
-      // Hide if behind camera
-      const dir = pos.clone().sub(camera.position);
-      const behind = camera.getWorldDirection(new THREE.Vector3()).dot(dir) < 0;
-      label.style.display = behind ? 'none' : 'block';
-    }
+  buildingStates.forEach((state) => {
+    const worldPos = new THREE.Vector3(
+      state.group.position.x,
+      state.currentHeight + ROOF_HEIGHT + 0.8,
+      state.group.position.z,
+    );
+    const screen = worldToScreen(worldPos);
+    state.label.style.left = `${screen.x}px`;
+    state.label.style.top = `${screen.y}px`;
+
+    const dir = worldPos.clone().sub(camera.position);
+    const behind = camera.getWorldDirection(new THREE.Vector3()).dot(dir) < 0;
+    state.label.style.display = behind ? 'none' : 'block';
   });
 }
 
@@ -248,10 +341,10 @@ function updateHero(data: CoinData[]) {
   heroLabel.textContent = 'Total Market Cap';
 }
 
-function updateStamp(data: CoinData[]) {
+function updateStamp() {
   const ago = lastFetchTime ? Math.round((performance.now() - lastFetchTime) / 1000) : 0;
   const status = isLive ? 'live' : 'fallback';
-  stamp.textContent = `CoinGecko · ${data.length} coins · ${status} · ${ago}s ago`;
+  stamp.textContent = `CoinGecko · Top 10 · ${status} · ${ago}s ago`;
 }
 
 // ─── QUIET ZONE ───
@@ -269,7 +362,7 @@ function showDetail(index: number) {
 
   const change = coin.price_change_percentage_24h || 0;
   qzChange.textContent = `${change >= 0 ? '+' : ''}${change.toFixed(2)}%`;
-  qzChange.style.color = change >= 0 ? '#26a69a' : '#e57373';
+  qzChange.style.color = change >= 0 ? ROOF_GREEN : ROOF_RED;
 
   qzSub.textContent = `Rank #${coin.market_cap_rank} · Cap ${formatMarketCap(coin.market_cap)}`;
 }
@@ -277,10 +370,10 @@ function showDetail(index: number) {
 function hideDetail() {
   quietzone.classList.remove('visible');
   selectedIndex = -1;
-  // Reset building emissive
-  buildings.forEach(b => {
-    const mat = b.material as THREE.MeshStandardMaterial;
-    mat.emissiveIntensity = 0.15;
+  selectedBuilding = null;
+  buildingStates.forEach((state) => {
+    const mat = state.roof.material as THREE.MeshStandardMaterial;
+    mat.emissiveIntensity = 0.2;
   });
 }
 
@@ -288,6 +381,8 @@ function hideDetail() {
 const raycaster = new THREE.Raycaster();
 const pointer = new THREE.Vector2();
 let pointerDown = false;
+
+const bodyMeshes = () => buildingStates.map(s => s.body);
 
 renderer.domElement.addEventListener('pointerdown', () => {
   pointerDown = true;
@@ -300,20 +395,20 @@ renderer.domElement.addEventListener('pointerup', (e: PointerEvent) => {
   pointer.y = -(e.clientY / window.innerHeight) * 2 + 1;
 
   raycaster.setFromCamera(pointer, camera);
-  const intersects = raycaster.intersectObjects(buildings);
+  const intersects = raycaster.intersectObjects(bodyMeshes());
 
   if (intersects.length > 0) {
     const mesh = intersects[0].object as THREE.Mesh;
     const idx = mesh.userData.index;
     if (idx !== undefined) {
-      // Highlight selected
-      buildings.forEach(b => {
-        const mat = b.material as THREE.MeshStandardMaterial;
-        mat.emissiveIntensity = 0.15;
+      buildingStates.forEach((state) => {
+        const mat = state.roof.material as THREE.MeshStandardMaterial;
+        mat.emissiveIntensity = 0.2;
       });
-      const mat = mesh.material as THREE.MeshStandardMaterial;
+      const state = buildingStates[idx];
+      const mat = state.roof.material as THREE.MeshStandardMaterial;
       mat.emissiveIntensity = 0.5;
-      selectedBuilding = mesh;
+      selectedBuilding = state.body;
       showDetail(idx);
     }
   } else {
@@ -321,12 +416,11 @@ renderer.domElement.addEventListener('pointerup', (e: PointerEvent) => {
   }
 });
 
-// Touch guard
 renderer.domElement.addEventListener('touchstart', (e) => {
-  if (e.touches.length > 1) return; // allow pinch zoom
+  if (e.touches.length > 1) return;
   pointerDown = true;
 });
-renderer.domElement.addEventListener('touchend', (e) => {
+renderer.domElement.addEventListener('touchend', () => {
   pointerDown = false;
 });
 
@@ -340,13 +434,13 @@ async function fetchCoins() {
       coins = data;
       isLive = true;
       lastFetchTime = performance.now();
-      buildCity(coins);
+      applyCoinData(coins);
     }
   } catch (err) {
     console.warn('CoinGecko fetch failed, using fallback:', err);
     isLive = false;
     lastFetchTime = performance.now();
-    buildCity(coins);
+    applyCoinData(coins);
   }
 }
 
@@ -364,10 +458,26 @@ function animate() {
   requestAnimationFrame(animate);
   controls.update();
 
-  // Animate building labels follow 3D positions
+  const time = Date.now() * 0.001;
+
+  buildingStates.forEach((state, i) => {
+    state.currentHeight += (state.targetHeight - state.currentHeight) * C.heightLerp;
+    state.body.scale.y = state.currentHeight;
+    state.body.position.y = state.currentHeight / 2;
+    state.roof.position.y = state.currentHeight + ROOF_HEIGHT / 2;
+
+    state.currentRoofColor.lerp(state.targetRoofColor, C.colorLerp);
+    const roofMat = state.roof.material as THREE.MeshStandardMaterial;
+    roofMat.color.copy(state.currentRoofColor);
+    roofMat.emissive.copy(state.currentRoofColor);
+
+    if (i !== selectedIndex) {
+      roofMat.emissiveIntensity = 0.15 + 0.05 * Math.sin(time * 0.5 + i * 0.7);
+    }
+  });
+
   updateLabels();
 
-  // Idle timer for quiet zone fade
   if (quietzone.classList.contains('visible')) {
     idleTimer += 16;
     if (idleTimer > 3000) {
@@ -375,21 +485,12 @@ function animate() {
     }
   }
 
-  // Gentle ambient building pulse
-  const time = Date.now() * 0.001;
-  buildings.forEach((b, i) => {
-    const mat = b.material as THREE.MeshStandardMaterial;
-    if (i !== selectedIndex) {
-      mat.emissiveIntensity = 0.1 + 0.05 * Math.sin(time * 0.5 + i * 0.7);
-    }
-  });
-
   renderer.render(scene, camera);
 }
 
 // ─── START ───
 lastFetchTime = performance.now();
-buildCity(FALLBACK_COINS); // render immediately with fallback
-fetchCoins(); // then fetch live
+initCity(FALLBACK_COINS);
+fetchCoins();
 setInterval(fetchCoins, C.pollInterval);
 animate();
